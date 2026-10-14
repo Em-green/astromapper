@@ -1,0 +1,669 @@
+import React, { useState, useMemo } from "react";
+
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+function rev(x) { x = x % 360; if (x < 0) x += 360; return x; }
+function norm180(x) { while (x > 180) x -= 360; while (x < -180) x += 360; return x; }
+
+function julianDate(y, m, day, h) {
+  if (m <= 2) { y -= 1; m += 12; }
+  const A = Math.floor(y / 100);
+  const B = 2 - A + Math.floor(A / 4);
+  return Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + day + B - 1524.5 + h / 24;
+}
+
+function elementsFor(planet, d) {
+  switch (planet) {
+    case "Sun": return { N: 0, i: 0, w: rev(282.9404 + 4.70935e-5 * d), a: 1.0, e: 0.016709 - 1.151e-9 * d, M: rev(356.0470 + 0.9856002585 * d) };
+    case "Moon": return { N: rev(125.1228 - 0.0529538083 * d), i: 5.1454, w: rev(318.0634 + 0.1643573223 * d), a: 60.2666, e: 0.0549, M: rev(115.3654 + 13.0649929509 * d) };
+    case "Mercury": return { N: rev(48.3313 + 3.24587e-5 * d), i: 7.0047 + 5.0e-8 * d, w: rev(29.1241 + 1.01444e-5 * d), a: 0.387098, e: 0.205635 + 5.59e-10 * d, M: rev(168.6562 + 4.0923344368 * d) };
+    case "Venus": return { N: rev(76.6799 + 2.4659e-5 * d), i: 3.3946 + 2.75e-8 * d, w: rev(54.891 + 1.38374e-5 * d), a: 0.72333, e: 0.006773 - 1.302e-9 * d, M: rev(48.0052 + 1.6021302244 * d) };
+    case "Mars": return { N: rev(49.5574 + 2.11081e-5 * d), i: 1.8497 - 1.78e-8 * d, w: rev(286.5016 + 2.92961e-5 * d), a: 1.523688, e: 0.093405 + 2.516e-9 * d, M: rev(18.6021 + 0.5240207766 * d) };
+    case "Jupiter": return { N: rev(100.4542 + 2.76854e-5 * d), i: 1.303 - 1.557e-7 * d, w: rev(273.8777 + 1.64505e-5 * d), a: 5.20256, e: 0.048498 + 4.469e-9 * d, M: rev(19.895 + 0.0830853001 * d) };
+    case "Saturn": return { N: rev(113.6634 + 2.3898e-5 * d), i: 2.4886 - 1.081e-7 * d, w: rev(339.3939 + 2.97661e-5 * d), a: 9.55475, e: 0.055546 - 9.499e-9 * d, M: rev(316.967 + 0.0334442282 * d) };
+    case "Uranus": return { N: rev(74.0005 + 1.3978e-5 * d), i: 0.7733 + 1.9e-8 * d, w: rev(96.6612 + 3.0565e-5 * d), a: 19.18171 - 1.55e-8 * d, e: 0.047318 + 7.45e-9 * d, M: rev(142.5905 + 0.011725806 * d) };
+    case "Neptune": return { N: rev(131.7806 + 3.0173e-5 * d), i: 1.77 - 2.55e-7 * d, w: rev(272.8461 - 6.027e-6 * d), a: 30.05826 + 3.313e-8 * d, e: 0.008606 + 2.15e-9 * d, M: rev(260.2471 + 0.005995147 * d) };
+    default: return null;
+  }
+}
+function plutoElements(T) {
+  const a = 39.48211675 - 0.00031596 * T, e = 0.2488273 + 0.0000517 * T, i = 17.14001206 + 0.00004818 * T;
+  const L = rev(238.92903833 + 145.20780515 * T), peri = rev(224.06891629 - 0.04062942 * T), N = rev(110.30393684 - 0.01183482 * T);
+  return { N, i, w: rev(peri - N), a, e, M: rev(L - peri) };
+}
+function solveKepler(M, e) {
+  let E = M * D2R; const Mr = M * D2R;
+  for (let it = 0; it < 50; it++) {
+    const dE = (E - e * Math.sin(E) - Mr) / (1 - e * Math.cos(E));
+    E -= dE; if (Math.abs(dE) < 1e-9) break;
+  }
+  return E;
+}
+function helioXYZ(el) {
+  const { N, i, w, a, e, M } = el;
+  const E = solveKepler(M, e);
+  const xv = a * (Math.cos(E) - e), yv = a * (Math.sqrt(1 - e * e) * Math.sin(E));
+  const v = rev(Math.atan2(yv, xv) * R2D), r = Math.sqrt(xv * xv + yv * yv);
+  const Nr = N * D2R, ir = i * D2R, wv = (v + w) * D2R;
+  const xh = r * (Math.cos(Nr) * Math.cos(wv) - Math.sin(Nr) * Math.sin(wv) * Math.cos(ir));
+  const yh = r * (Math.sin(Nr) * Math.cos(wv) + Math.cos(Nr) * Math.sin(wv) * Math.cos(ir));
+  const zh = r * (Math.sin(wv) * Math.sin(ir));
+  return { x: xh, y: yh, z: zh };
+}
+
+// Core: given a Julian Date (UT), return ecliptic lon/lat, RA/Dec for all 10 bodies + GST(deg)
+function computePositionsJD(JD) {
+  const d = JD - 2451543.5;
+  const T = (JD - 2451545.0) / 36525;
+
+  const sunEl = elementsFor("Sun", d);
+  const Esun = solveKepler(sunEl.M, sunEl.e);
+  const xs = sunEl.a * (Math.cos(Esun) - sunEl.e), ys = sunEl.a * Math.sqrt(1 - sunEl.e * sunEl.e) * Math.sin(Esun);
+  const sunLon = rev(Math.atan2(ys, xs) * R2D + sunEl.w);
+  const sunDist = Math.sqrt(xs * xs + ys * ys);
+  const xEarth = -sunDist * Math.cos(sunLon * D2R), yEarth = -sunDist * Math.sin(sunLon * D2R);
+
+  const out = {};
+  out.Sun = { lon: sunLon, lat: 0 };
+
+  const moonEl = elementsFor("Moon", d);
+  const moonH = helioXYZ(moonEl);
+  let moonLon = rev(Math.atan2(moonH.y, moonH.x) * R2D);
+  let moonLat = R2D * Math.atan2(moonH.z, Math.sqrt(moonH.x * moonH.x + moonH.y * moonH.y));
+  const Ms = sunEl.M, Mm = moonEl.M, Nm = moonEl.N;
+  const Lm = rev(Mm + moonEl.w + Nm), Ls = rev(Ms + sunEl.w), Dm = rev(Lm - Ls);
+  moonLon = rev(moonLon
+    - 1.274 * Math.sin((Mm - 2 * Dm) * D2R) + 0.658 * Math.sin(2 * Dm * D2R)
+    - 0.186 * Math.sin(Ms * D2R) - 0.059 * Math.sin((2 * Mm - 2 * Dm) * D2R)
+    - 0.057 * Math.sin((Mm - 2 * Dm + Ms) * D2R) + 0.053 * Math.sin((Mm + 2 * Dm) * D2R)
+    + 0.046 * Math.sin((2 * Dm - Ms) * D2R) + 0.041 * Math.sin((Mm - Ms) * D2R)
+    - 0.035 * Math.sin(Dm * D2R) - 0.031 * Math.sin((Mm + Ms) * D2R)
+    - 0.015 * Math.sin((2 * Nm - 2 * Dm) * D2R) + 0.011 * Math.sin((Mm - 4 * Dm) * D2R));
+  moonLat = moonLat
+    - 0.173 * Math.sin((Nm - 2 * Dm) * D2R) - 0.055 * Math.sin((Mm - Nm - 2 * Dm) * D2R)
+    - 0.046 * Math.sin((Mm + Nm - 2 * Dm) * D2R) + 0.033 * Math.sin((Nm + 2 * Dm) * D2R)
+    + 0.017 * Math.sin((2 * Mm + Nm) * D2R);
+  out.Moon = { lon: moonLon, lat: moonLat };
+
+  for (const p of ["Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]) {
+    const h_ = helioXYZ(elementsFor(p, d));
+    const xg = h_.x - xEarth, yg = h_.y - yEarth, zg = h_.z;
+    out[p] = { lon: rev(Math.atan2(yg, xg) * R2D), lat: R2D * Math.atan2(zg, Math.sqrt(xg * xg + yg * yg)) };
+  }
+  const plH = helioXYZ(plutoElements(T));
+  {
+    const xg = plH.x - xEarth, yg = plH.y - yEarth, zg = plH.z;
+    out.Pluto = { lon: rev(Math.atan2(yg, xg) * R2D), lat: R2D * Math.atan2(zg, Math.sqrt(xg * xg + yg * yg)) };
+  }
+
+  const oblq = 23.4393 - 3.563e-7 * d;
+  const oblr = oblq * D2R;
+  const gst = rev(280.46061837 + 360.98564736629 * (JD - 2451545.0) + 0.000387933 * T * T - (T * T * T) / 38710000);
+  for (const k of Object.keys(out)) {
+    const lonr = out[k].lon * D2R, latr = out[k].lat * D2R;
+    out[k].ra = rev(R2D * Math.atan2(Math.sin(lonr) * Math.cos(oblr) - Math.tan(latr) * Math.sin(oblr), Math.cos(lonr)));
+    out[k].dec = R2D * Math.asin(Math.sin(latr) * Math.cos(oblr) + Math.cos(latr) * Math.sin(oblr) * Math.sin(lonr));
+  }
+  return { bodies: out, gst };
+}
+
+// MC/IC longitude for a body, given natal RA + natal GST
+function mcIcLon(ra, gst) {
+  const mc = norm180(ra - gst);
+  return { mc, ic: norm180(mc + 180) };
+}
+// AC/DC latitude at a given geographic longitude
+function acDcLat(ra, dec, gst, lon) {
+  const H = norm180(gst + lon - ra);
+  const decr = dec * D2R;
+  if (Math.abs(Math.tan(decr)) < 1e-9) return null;
+  const tphi = -Math.cos(H * D2R) / Math.tan(decr);
+  return { phi: R2D * Math.atan(tphi), kind: H < 0 ? "AC" : "DC" };
+}
+
+/* =========================================================
+   PLANET METADATA
+========================================================= */
+const PLANETS = [
+  { key: "Sun", glyph: "☉", name: "太陽", color: "#E2CAA0", cat: "fav", mean: "活力・自己表現" },
+  { key: "Moon", glyph: "☽", name: "月", color: "#CDD6E8", cat: "fav", mean: "感情・安心感" },
+  { key: "Mercury", glyph: "☿", name: "水星", color: "#B2CBCB", cat: "neu", mean: "知性・対話" },
+  { key: "Venus", glyph: "♀", name: "金星", color: "#D9B4C8", cat: "fav", mean: "恋愛・美・調和" },
+  { key: "Mars", glyph: "♂", name: "火星", color: "#D99798", cat: "cha", mean: "行動力・情熱" },
+  { key: "Jupiter", glyph: "♃", name: "木星", color: "#D1B89A", cat: "fav", mean: "幸運・拡大" },
+  { key: "Saturn", glyph: "♄", name: "土星", color: "#B9AA8D", cat: "cha", mean: "責任・忍耐" },
+  { key: "Uranus", glyph: "♅", name: "天王星", color: "#9CCACC", cat: "cha", mean: "変化・自由" },
+  { key: "Neptune", glyph: "♆", name: "海王星", color: "#99B3D7", cat: "neu", mean: "直感・芸術" },
+  { key: "Pluto", glyph: "♇", name: "冥王星", color: "#B8A2C9", cat: "cha", mean: "変容・再生" },
+];
+const PMETA = Object.fromEntries(PLANETS.map(p => [p.key, p]));
+const LINE_MEAN = { MC: "社会的成功・キャリア", IC: "心の拠点・家庭", AC: "自己表現・第一印象", DC: "対人関係・パートナーシップ" };
+
+// Full natural-language description for every (planet × line) combination
+const LINE_DESC = {
+  Sun: {
+    MC: "仕事や社会的な活躍の場で、自分の存在感が自然と強まりやすい場所",
+    IC: "心の拠点が定まり、安心して自分らしさを養える場所",
+    AC: "第一印象から活力があふれ、自己表現がしやすい場所",
+    DC: "人との関わりを通じて、自分の魅力や個性が引き出される場所",
+  },
+  Moon: {
+    MC: "家庭的な温かさやケア気質が、公の場でも評価されやすい場所",
+    IC: "心が深く安らぐ、\"帰る場所\"のように感じられる場所",
+    AC: "感受性が豊かになり、直感や共感力が前に出やすい場所",
+    DC: "人との心の距離が縮まり、情緒的なつながりが生まれやすい場所",
+  },
+  Mercury: {
+    MC: "知的な活動やコミュニケーション能力が、社会的に評価されやすい場所",
+    IC: "身近な暮らしの中で、学びや会話が自然と増える場所",
+    AC: "知的好奇心が刺激され、会話や発信がしやすくなる場所",
+    DC: "人との対話や情報交換が活発になり、人脈が広がりやすい場所",
+  },
+  Venus: {
+    MC: "美意識やセンスが、仕事や社会的な評価につながりやすい場所",
+    IC: "恋愛・美・調和の心の拠点になりやすく、暮らしに彩りが生まれる場所",
+    AC: "魅力や美しさが自然と引き出され、人に好印象を与えやすい場所",
+    DC: "良縁や調和のとれた人間関係に恵まれやすい場所",
+  },
+  Mars: {
+    MC: "仕事や社会的な場で闘争心や行動力が強く出やすい場所（やや競争的）",
+    IC: "家庭や心の内側に情熱や緊張感が生まれやすい場所",
+    AC: "自己主張が強まり、エネルギッシュだが衝突も増えやすい場所",
+    DC: "人間関係に刺激や情熱をもたらす一方、対立も起きやすい場所",
+  },
+  Jupiter: {
+    MC: "社会的な成功・キャリアの拡大運に恵まれやすい場所",
+    IC: "家庭や心の基盤が、幸運や安定によって支えられやすい場所",
+    AC: "チャンスや幸運が自然と巡ってきやすい場所",
+    DC: "人との縁を通じて、チャンスや幸運が広がりやすい場所",
+  },
+  Saturn: {
+    MC: "キャリアに重みや責任がのしかかるが、長期的な実力につながる場所",
+    IC: "家庭や心の基盤に重圧を感じやすいが、安定や成熟をもたらす場所",
+    AC: "慎重さや忍耐が求められ、自由に動きづらく感じることがある場所",
+    DC: "人間関係に責任や制約が生まれやすく、関わりが重く感じることがある場所",
+  },
+  Uranus: {
+    MC: "仕事やキャリアに予想外の変化や刺激が起きやすい場所",
+    IC: "家庭や生活基盤が不安定になりやすいが、自由や刷新も得られる場所",
+    AC: "個性や独立心が強く出て、型破りな行動をとりやすくなる場所",
+    DC: "人間関係が急に変化しやすく、自由でユニークな縁が生まれることもある場所",
+  },
+  Neptune: {
+    MC: "直感や芸術性が仕事に活きるが、方向性が曖昧になりやすい場所",
+    IC: "夢や幻想が広がりやすく、現実感がふわっと薄れることもある場所",
+    AC: "感受性や直感が鋭くなるが、現実とのズレを感じることもある場所",
+    DC: "スピリチュアルで幻想的な人間関係に惹かれやすいが、誤解も起きやすい場所",
+  },
+  Pluto: {
+    MC: "キャリアや社会的立場に、強烈な変容・再生のテーマが起きやすい場所",
+    IC: "家庭やルーツに深い変容が訪れ、内面が大きく変わりやすい場所",
+    AC: "自己変革の力が強まり、人生観そのものが変わるような体験をしやすい場所",
+    DC: "人間関係に強烈な変化や運命的な出会いが起きやすい場所",
+  },
+};
+
+// Short "○○運" label for each planet × line combination, used in the timing tab
+const FORTUNE_LABEL = {
+  Sun: { MC: "仕事運", IC: "安心運", AC: "自分運", DC: "人気運" },
+  Moon: { MC: "ケア運", IC: "家庭運", AC: "感情運", DC: "縁運" },
+  Mercury: { MC: "知性運", IC: "学び運", AC: "会話運", DC: "人脈運" },
+  Venus: { MC: "魅力運", IC: "恋愛運", AC: "美容運", DC: "良縁運" },
+  Mars: { MC: "闘争運", IC: "情熱運", AC: "行動運", DC: "刺激運" },
+  Jupiter: { MC: "出世運", IC: "安定運", AC: "幸運", DC: "チャンス運" },
+  Saturn: { MC: "重圧運", IC: "忍耐運", AC: "慎重運", DC: "責任運" },
+  Uranus: { MC: "激変運", IC: "不安定運", AC: "自由運", DC: "刷新運" },
+  Neptune: { MC: "直感運", IC: "幻想運", AC: "感受運", DC: "スピリチュアル運" },
+  Pluto: { MC: "激動運", IC: "変容運", AC: "覚醒運", DC: "運命的な縁運" },
+};
+function fortuneSuffix(cat) {
+  if (cat === "fav") return "アップ";
+  if (cat === "cha") return "が強まる（要注意）";
+  return "が活発に";
+}
+
+function buildVerdict(dist) {
+  const favHits = PLANETS.filter(p => p.cat === "fav").map(p => ({ p, info: dist[p.key] })).filter(x => x.info.dist < ORB).sort((a, b) => a.info.dist - b.info.dist);
+  const chaHits = PLANETS.filter(p => p.cat === "cha").map(p => ({ p, info: dist[p.key] })).filter(x => x.info.dist < ORB).sort((a, b) => a.info.dist - b.info.dist);
+  if (favHits.length === 0 && chaHits.length === 0) {
+    return { tone: "neutral", text: "目立った天体ラインは通っていません。良くも悪くもなく、特別な引力を感じにくい\"フラットな\"場所のようです。" };
+  }
+  if (favHits.length > 0 && chaHits.length === 0) {
+    const top = favHits[0];
+    return { tone: "fav", text: `${PMETA[top.p.key].name}${top.info.type}が強く効いています（誤差${top.info.dist.toFixed(1)}°）。${LINE_DESC[top.p.key][top.info.type]}だと考えられます。` };
+  }
+  if (chaHits.length > 0 && favHits.length === 0) {
+    const top = chaHits[0];
+    return { tone: "cha", text: `${PMETA[top.p.key].name}${top.info.type}が強く効いています（誤差${top.info.dist.toFixed(1)}°）。${LINE_DESC[top.p.key][top.info.type]}と言えそうです。刺激的ですが、ゆったり過ごすには向かないかもしれません。` };
+  }
+  const f = favHits[0], c = chaHits[0];
+  return { tone: "mixed", text: `${PMETA[f.p.key].name}${f.info.type}（誤差${f.info.dist.toFixed(1)}°）と${PMETA[c.p.key].name}${c.info.type}（誤差${c.info.dist.toFixed(1)}°）が同時に効いている、二面性のある場所です。${LINE_DESC[f.p.key][f.info.type]}という側面と、${LINE_DESC[c.p.key][c.info.type]}という側面が両立しそうです。` };
+}
+
+/* =========================================================
+   CITY DATABASE
+========================================================= */
+// Country/area labels describe the registered points, independent of rankings.
+const COUNTRY_GROUPS = {
+  "日本":["東京","大阪","那覇","札幌","福岡","京都","名古屋","横浜","仙台","広島","金沢","鹿児島","新潟","盛岡"],
+  "韓国":["ソウル"],"中国":["北京","上海"],"台湾":["台北"],"香港":["香港"],"シンガポール":["シンガポール"],
+  "タイ":["バンコク"],"インドネシア":["ジャカルタ","バリ島"],"フィリピン":["マニラ"],"インド":["デリー","ムンバイ"],
+  "アラブ首長国連邦":["ドバイ"],"トルコ":["イスタンブール"],"マレーシア":["クアラルンプール"],
+  "イギリス":["ロンドン","エディンバラ"],"アイルランド":["ダブリン"],"フランス":["パリ"],"ベルギー":["ブリュッセル"],
+  "ドイツ":["ベルリン","ミュンヘン","フランクフルト"],"オランダ":["アムステルダム"],"オーストリア":["ウィーン"],"スイス":["チューリッヒ","ジュネーブ"],
+  "イタリア":["ローマ","ミラノ","フィレンツェ","ヴェネツィア","ナポリ"],"スペイン":["マドリード","バルセロナ"],"ポルトガル":["リスボン"],
+  "ギリシャ":["アテネ"],"チェコ":["プラハ"],"ポーランド":["ワルシャワ"],"ハンガリー":["ブダペスト"],"スウェーデン":["ストックホルム"],
+  "デンマーク":["コペンハーゲン"],"ノルウェー":["オスロ"],"フィンランド":["ヘルシンキ"],"アイスランド":["レイキャビク"],"ロシア":["モスクワ"],
+  "アメリカ":["ニューヨーク","ボストン","ワシントンDC","フィラデルフィア","シカゴ","ナッシュビル","ニューオーリンズ","アトランタ","マイアミ","ヒューストン","オースティン","デンバー","ラスベガス","ロサンゼルス","サンフランシスコ","シアトル","ポートランド","ホノルル"],
+  "カナダ":["バンクーバー","トロント"],"メキシコ":["メキシコシティ"],"ブラジル":["サンパウロ","リオデジャネイロ"],"アルゼンチン":["ブエノスアイレス"],"コロンビア":["ボゴタ"],
+  "エジプト":["カイロ","アレクサンドリア","ルクソール"],"ケニア":["ナイロビ"],"南アフリカ":["ケープタウン"],"モロッコ":["マラケシュ"],"イスラエル":["テルアビブ"],
+  "オーストラリア":["シドニー","メルボルン","ブリスベン"],"ニュージーランド":["オークランド"],
+};
+const COUNTRY_BY_CITY=Object.fromEntries(Object.entries(COUNTRY_GROUPS).flatMap(([country,names])=>names.map(name=>[name,country])));
+const CITIES = [
+  ["東京", 35.68, 139.77, "日本", 9], ["大阪", 34.69, 135.50, "日本", 9], ["那覇", 26.21, 127.68, "日本", 9],
+  ["札幌", 43.06, 141.35, "日本", 9], ["福岡", 33.59, 130.40, "日本", 9], ["京都", 35.01, 135.77, "日本", 9],
+  ["名古屋", 35.18, 136.91, "日本", 9], ["横浜", 35.44, 139.64, "日本", 9], ["仙台", 38.27, 140.87, "日本", 9],
+  ["広島", 34.39, 132.46, "日本", 9], ["金沢", 36.56, 136.66, "日本", 9], ["鹿児島", 31.60, 130.56, "日本", 9],
+  ["新潟", 37.92, 139.04, "日本", 9], ["盛岡", 39.70, 141.15, "日本", 9],
+  ["ソウル", 37.57, 126.98, "アジア", 9], ["北京", 39.90, 116.41, "アジア", 8], ["上海", 31.23, 121.47, "アジア", 8],
+  ["台北", 25.03, 121.57, "アジア", 8], ["香港", 22.32, 114.17, "アジア", 8], ["シンガポール", 1.35, 103.82, "アジア", 8],
+  ["バンコク", 13.76, 100.50, "アジア", 7], ["ジャカルタ", -6.21, 106.85, "アジア", 7], ["マニラ", 14.60, 120.98, "アジア", 8],
+  ["デリー", 28.61, 77.21, "アジア", 5.5], ["ムンバイ", 19.08, 72.88, "アジア", 5.5], ["ドバイ", 25.20, 55.27, "中東", 4],
+  ["イスタンブール", 41.01, 28.98, "中東", 3], ["バリ島", -8.34, 115.09, "アジア", 8], ["クアラルンプール", 3.14, 101.69, "アジア", 8],
+  ["ロンドン", 51.51, -0.13, "欧州", 0], ["エディンバラ", 55.95, -3.19, "欧州", 0], ["ダブリン", 53.35, -6.26, "欧州", 0],
+  ["パリ", 48.86, 2.35, "欧州", 1], ["ブリュッセル", 50.85, 4.35, "欧州", 1], ["ベルリン", 52.52, 13.40, "欧州", 1],
+  ["ミュンヘン", 48.14, 11.58, "欧州", 1], ["フランクフルト", 50.11, 8.68, "欧州", 1], ["アムステルダム", 52.37, 4.90, "欧州", 1],
+  ["ウィーン", 48.21, 16.37, "欧州", 1], ["チューリッヒ", 47.38, 8.54, "欧州", 1], ["ジュネーブ", 46.20, 6.15, "欧州", 1],
+  ["ローマ", 41.90, 12.50, "欧州", 1], ["ミラノ", 45.46, 9.19, "欧州", 1], ["フィレンツェ", 43.77, 11.26, "欧州", 1],
+  ["ヴェネツィア", 45.44, 12.32, "欧州", 1], ["ナポリ", 40.85, 14.27, "欧州", 1], ["マドリード", 40.42, -3.70, "欧州", 1],
+  ["バルセロナ", 41.39, 2.17, "欧州", 1], ["リスボン", 38.72, -9.14, "欧州", 0], ["アテネ", 37.98, 23.73, "欧州", 2],
+  ["プラハ", 50.08, 14.44, "欧州", 1], ["ワルシャワ", 52.23, 21.01, "欧州", 1], ["ブダペスト", 47.50, 19.04, "欧州", 1],
+  ["ストックホルム", 59.33, 18.07, "欧州", 1], ["コペンハーゲン", 55.68, 12.57, "欧州", 1], ["オスロ", 59.91, 10.75, "欧州", 1],
+  ["ヘルシンキ", 60.17, 24.94, "欧州", 2], ["レイキャビク", 64.13, -21.90, "欧州", 0], ["モスクワ", 55.75, 37.62, "欧州", 3],
+  ["ニューヨーク", 40.71, -74.01, "北米", -5], ["ボストン", 42.36, -71.06, "北米", -5], ["ワシントンDC", 38.91, -77.04, "北米", -5],
+  ["フィラデルフィア", 39.95, -75.17, "北米", -5], ["シカゴ", 41.88, -87.63, "北米", -6], ["ナッシュビル", 36.16, -86.78, "北米", -6],
+  ["ニューオーリンズ", 29.95, -90.07, "北米", -6], ["アトランタ", 33.75, -84.39, "北米", -5], ["マイアミ", 25.76, -80.19, "北米", -5],
+  ["ヒューストン", 29.76, -95.37, "北米", -6], ["オースティン", 30.27, -97.74, "北米", -6], ["デンバー", 39.74, -104.99, "北米", -7],
+  ["ラスベガス", 36.17, -115.14, "北米", -8], ["ロサンゼルス", 34.05, -118.24, "北米", -8], ["サンフランシスコ", 37.77, -122.42, "北米", -8],
+  ["シアトル", 47.61, -122.33, "北米", -8], ["ポートランド", 45.52, -122.68, "北米", -8], ["バンクーバー", 49.28, -123.12, "北米", -8],
+  ["トロント", 43.65, -79.38, "北米", -5], ["ホノルル", 21.31, -157.86, "北米", -10], ["メキシコシティ", 19.43, -99.13, "中南米", -6],
+  ["サンパウロ", -23.55, -46.63, "中南米", -3], ["リオデジャネイロ", -22.91, -43.17, "中南米", -3], ["ブエノスアイレス", -34.60, -58.38, "中南米", -3],
+  ["ボゴタ", 4.71, -74.07, "中南米", -5], ["カイロ", 30.04, 31.24, "アフリカ", 2], ["アレクサンドリア", 31.20, 29.92, "アフリカ", 2],
+  ["ルクソール", 25.69, 32.64, "アフリカ", 2], ["ナイロビ", -1.29, 36.82, "アフリカ", 3], ["ケープタウン", -33.92, 18.42, "アフリカ", 2],
+  ["マラケシュ", 31.63, -7.99, "アフリカ", 1], ["テルアビブ", 32.08, 34.78, "中東", 2],
+  ["シドニー", -33.87, 151.21, "オセアニア", 10], ["メルボルン", -37.81, 144.96, "オセアニア", 10],
+  ["オークランド", -36.85, 174.76, "オセアニア", 12], ["ブリスベン", -27.47, 153.03, "オセアニア", 10],
+].map(([name, lat, lon, region, off]) => ({ name, lat, lon, region, off, country:COUNTRY_BY_CITY[name] }));
+const REGION_ORDER = ["日本", "アジア", "中東", "欧州", "北米", "中南米", "アフリカ", "オセアニア"];
+
+// dedupe (Sapporo listed twice above by accident-safe)
+const seen = new Set();
+const CITY_DB = CITIES.filter(c => { const k = c.name + c.lat; if (seen.has(k)) return false; seen.add(k); return true; });
+
+// Display grouping only: every pair of points in an area must be <= 80 km apart.
+const AREA_RADIUS_KM=80;
+function cityDistanceKm(a,b){
+  const dlat=(b.lat-a.lat)*D2R,dlon=(b.lon-a.lon)*D2R;
+  const d=Math.sin(dlat/2)**2+Math.cos(a.lat*D2R)*Math.cos(b.lat*D2R)*Math.sin(dlon/2)**2;
+  return 6371*2*Math.asin(Math.min(1,Math.sqrt(d)));
+}
+function buildCityAreas(cities){
+  const areas=[];
+  for(const city of cities){
+    const area=areas.find(a=>a.country===city.country&&a.members.every(member=>cityDistanceKm(member,city)<=AREA_RADIUS_KM));
+    if(area)area.members.push(city);else areas.push({id:city.name,country:city.country,members:[city]});
+  }
+  return areas.map(area=>({...area,label:area.members.length>1?area.members.slice(0,2).map(c=>c.name).join("・")+"周辺":area.members[0].name}));
+}
+const CITY_AREAS=buildCityAreas(CITY_DB);
+const CITY_AREA_BY_NAME=Object.fromEntries(CITY_AREAS.flatMap(area=>area.members.map(city=>[city.name,area])));
+function groupRankings(entries,limit=3){
+  const groups=[],byId=new Map();
+  for(const entry of entries){
+    const area=CITY_AREA_BY_NAME[entry.city.name]||{id:entry.city.name,label:entry.city.name};
+    if(byId.has(area.id))byId.get(area.id).members.push(entry);
+    else{const group={...entry,areaId:area.id,areaLabel:area.label,members:[entry]};byId.set(area.id,group);groups.push(group);}
+  }
+  return groups.slice(0,limit);
+}
+/* =========================================================
+   SCORING
+========================================================= */
+const ORB = 9; // degrees, for best/worst scoring
+function lineDistances(natal, lat, lon) {
+  // returns { bodyKey: {type, dist} } -- best (smallest) line per body at this location
+  const res = {};
+  for (const p of PLANETS) {
+    const b = natal.bodies[p.key];
+    const { mc, ic } = mcIcLon(b.ra, natal.gst);
+    const candidates = [
+      { type: "MC", dist: Math.abs(norm180(lon - mc)) },
+      { type: "IC", dist: Math.abs(norm180(lon - ic)) },
+    ];
+    const adac = acDcLat(b.ra, b.dec, natal.gst, lon);
+    if (adac) candidates.push({ type: adac.kind, dist: Math.abs(adac.phi - lat) });
+    candidates.sort((a, b2) => a.dist - b2.dist);
+    res[p.key] = candidates[0];
+  }
+  return res;
+}
+function scoreCity(natal, city) {
+  const dist = lineDistances(natal, city.lat, city.lon);
+  let fav = 0, cha = 0, peakFav = 0, peakCha = 0;
+  for (const p of PLANETS) {
+    const d = dist[p.key].dist;
+    const contrib = Math.max(0, ORB - d);
+    if (p.cat === "fav") { fav += contrib; if (contrib > peakFav) peakFav = contrib; }
+    if (p.cat === "cha") { cha += contrib; if (contrib > peakCha) peakCha = contrib; }
+  }
+  return { dist, fav, cha, peakFav, peakCha };
+}
+
+/* =========================================================
+   TRANSIT SCAN
+========================================================= */
+const TRANSIT_BODIES = ["Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"];
+const TRANSIT_ORB = 3;
+
+function scanTransits(natal, startJD, totalDays) {
+  // daily scan; group consecutive hit-days per (transitBody, natalBody)
+  const active = {}; // key -> {startIdx, minDiff, peakIdx}
+  const events = [];
+  for (let day = 0; day <= totalDays; day++) {
+    const JD = startJD + day;
+    const pos = computePositionsJD(JD);
+    for (const tb of TRANSIT_BODIES) {
+      const tlon = pos.bodies[tb].lon;
+      for (const p of PLANETS) {
+        const nlon = natal.bodies[p.key].lon;
+        const diff = Math.abs(norm180(tlon - nlon));
+        const key = tb + "_" + p.key;
+        if (diff <= TRANSIT_ORB) {
+          if (!active[key]) active[key] = { startDay: day, minDiff: diff, peakDay: day };
+          if (diff < active[key].minDiff) { active[key].minDiff = diff; active[key].peakDay = day; }
+          active[key].endDay = day;
+        } else if (active[key]) {
+          events.push({ transit: tb, natal: p.key, ...active[key] });
+          delete active[key];
+        }
+      }
+    }
+  }
+  for (const key of Object.keys(active)) {
+    const parts = key.split("_");
+    events.push({ transit: parts[0], natal: parts[1], ...active[key] });
+  }
+  events.sort((a, b) => a.startDay - b.startDay);
+  return events.map(e => ({
+    ...e,
+    startDate: new Date((startJD + e.startDay - 2440587.5) * 86400000),
+    endDate: new Date((startJD + e.endDay - 2440587.5) * 86400000),
+    peakDate: new Date((startJD + e.peakDay - 2440587.5) * 86400000),
+  }));
+}
+
+function bestCityForBody(natal, bodyKey) {
+  let best = null;
+  for (const city of CITY_DB) {
+    const d = lineDistances(natal, city.lat, city.lon)[bodyKey];
+    if (!best || d.dist < best.dist) best = { city, ...d };
+  }
+  return best;
+}
+
+function fmtDate(d) {
+  return `${d.getUTCFullYear()}/${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
+/* =========================================================
+   PRESET BIRTH CITIES (quick fill)
+========================================================= */
+/* PRESETS removed in favor of full city-select in the birth form */
+
+
+// Editorial astrology rules: these scores are not probabilities.
+const THEMES = [
+  { id:"love", label:"恋愛運", short:"LOVE", icon:"♡", description:"出会い、パートナーシップ、心のつながり。", color:"#efb6ce", lines:[["Venus","DC",1],["Venus","AC",.65],["Moon","DC",.5]], worstLines:[["Saturn","DC",1],["Mars","DC",.85],["Pluto","DC",.7],["Saturn","IC",.6]], worstDescription:"関係の重さや衝突、強い結びつきなど、恋愛で向き合う課題が出やすいと読む都市。" },
+  { id:"work", label:"仕事運", short:"CAREER", icon:"↗", description:"自分の強みを発揮し、キャリアを育てる。", color:"#9bbaff", lines:[["Sun","MC",1],["Jupiter","MC",.85],["Mercury","MC",.65]], worstLines:[["Saturn","MC",1],["Mars","MC",.8],["Uranus","MC",.75]], worstDescription:"責任や競争、予想外の変化など、仕事での挑戦が高まりやすいと読む都市。" },
+  { id:"fortune", label:"金運・チャンス", short:"OPPORTUNITY", icon:"✧", description:"可能性を広げ、新しい機会に出会う。", color:"#e3ce9b", lines:[["Jupiter","MC",1],["Jupiter","AC",.8],["Venus","MC",.65]], worstLines:[["Saturn","MC",1],["Neptune","MC",.8],["Pluto","MC",.65]], worstDescription:"発展への制約や方向性の曖昧さ、強い変化などに向き合うと読む都市。" },
+  { id:"home", label:"居心地・家庭運", short:"BELONGING", icon:"⌂", description:"ほっとできる居場所と、暮らしの基盤。", color:"#a9d6c6", lines:[["Moon","IC",1],["Venus","IC",.75],["Sun","IC",.65]], worstLines:[["Saturn","IC",1],["Mars","IC",.8],["Uranus","IC",.75]], worstDescription:"暮らしの重圧や緊張、生活基盤の変化が出やすいと読む都市。" },
+  { id:"learn", label:"学び・交流運", short:"CONNECTION", icon:"↔", description:"学び、言葉、人との新しいつながり。", color:"#9dd4ec", lines:[["Mercury","AC",1],["Mercury","DC",.9],["Mercury","MC",.75]], worstLines:[["Saturn","DC",1],["Mars","DC",.8],["Neptune","DC",.65],["Saturn","MC",.5]], worstDescription:"人との関わりで責任や対立、誤解などの課題が出やすいと読む都市。" },
+  { id:"create", label:"創作・感性", short:"CREATIVITY", icon:"✳", description:"美意識とインスピレーションを刺激する。", color:"#c5b8ef", lines:[["Venus","AC",1],["Neptune","MC",.8],["Neptune","AC",.7]], worstLines:[["Saturn","MC",1],["Saturn","AC",.9],["Mars","MC",.65]], worstDescription:"創作で慎重さや制約、競争などに向き合う場として読む都市。" },
+  { id:"self", label:"自分らしさ", short:"SELF EXPRESSION", icon:"☉", description:"自信を持って、自分の個性を表現する。", color:"#edc49e", lines:[["Sun","AC",1],["Sun","MC",.8],["Jupiter","AC",.6]], worstLines:[["Saturn","AC",1],["Pluto","AC",.85],["Mars","AC",.65],["Saturn","MC",.6]], worstDescription:"自分を出しづらい感覚や強い変容、自己主張の課題が出やすいと読む都市。" },
+];
+const TIME_PERIODS = [
+  {id:"dawn",label:"早朝",range:"04:00–08:00",time:"06:00"},
+  {id:"morning",label:"午前",range:"08:00–12:00",time:"10:00"},
+  {id:"noon",label:"お昼",range:"12:00–14:00",time:"13:00"},
+  {id:"afternoon",label:"午後",range:"14:00–18:00",time:"16:00"},
+  {id:"evening",label:"夕方・夜",range:"18:00–22:00",time:"20:00"},
+  {id:"night",label:"夜遅く",range:"22:00–24:00",time:"23:00"},
+  {id:"midnight",label:"深夜",range:"00:00–04:00",time:"02:00"},
+];
+const h=React.createElement;
+function localISODate(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
+function validDate(value){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
+  const [y,m,d]=value.split("-").map(Number),dt=new Date(Date.UTC(y,m-1,d));
+  return y>=1900&&y<=2100&&dt.getUTCFullYear()===y&&dt.getUTCMonth()===m-1&&dt.getUTCDate()===d;
+}
+function resolveBirthTime(mode,exact,periodId){
+  if(mode==="unknown")return "12:00";
+  if(mode==="approx")return TIME_PERIODS.find(p=>p.id===periodId)?.time||null;
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(exact)?exact:null;
+}
+function validCoordinates(lat,lon){return lat!==""&&lon!==""&&Number.isFinite(Number(lat))&&Number.isFinite(Number(lon))&&Math.abs(Number(lat))<=90&&Math.abs(Number(lon))<=180;}
+function validateBirth(form,mode,period){
+  if(!validDate(form.date)||form.date>localISODate())return "生年月日を正しく入力してください（1900年以降、今日まで）。";
+  if(!resolveBirthTime(mode,form.time,period))return "出生時刻を入力してください。わからない場合は「だいたい」か「不明」を選べます。";
+  if(form.off===""||!Number.isFinite(Number(form.off))||Number(form.off)<-12||Number(form.off)>14)return "UTCオフセットは −12〜＋14 の範囲で入力してください。";
+  if(!validCoordinates(form.lat,form.lon))return "緯度は −90〜90、経度は −180〜180 の範囲で入力してください。";
+  return "";
+}
+function distancesForLines(natal,city){
+  const result={};
+  for(const p of PLANETS){
+    const b=natal.bodies[p.key],{mc,ic}=mcIcLon(b.ra,natal.gst);
+    result[`${p.key}_MC`]=Math.abs(norm180(city.lon-mc));result[`${p.key}_IC`]=Math.abs(norm180(city.lon-ic));
+    const ad=acDcLat(b.ra,b.dec,natal.gst,city.lon);
+    result[`${p.key}_AC`]=ad&&ad.kind==="AC"?Math.abs(ad.phi-city.lat):Infinity;
+    result[`${p.key}_DC`]=ad&&ad.kind==="DC"?Math.abs(ad.phi-city.lat):Infinity;
+  }
+  return result;
+}
+// Absolute proximity bands for display, not an outcome probability.
+function matchLevel(distance){return distance<3?3:distance<ORB?2:1;}
+function rankTheme(natal,theme,cities=CITY_DB){
+  return cities.map((city,index)=>{
+    const distances=distancesForLines(natal,city);
+    const contributions=theme.lines.map(([planet,type,weight])=>({planet,type,weight,dist:distances[`${planet}_${type}`]}));
+    const score=contributions.reduce((sum,line)=>sum+Math.max(0,ORB-line.dist)*line.weight,0);
+    const hits=contributions.filter(line=>line.dist<ORB).sort((a,b)=>(ORB-b.dist)*b.weight-(ORB-a.dist)*a.weight);
+    const nearest=[...contributions].sort((a,b)=>a.dist-b.dist)[0];
+    const primary=hits[0]||nearest;
+    return {city,score,hits,primary,nearest,index,level:matchLevel(primary.dist),fallback:score===0};
+  }).sort((a,b)=>b.score-a.score||(a.fallback&&b.fallback?a.nearest.dist-b.nearest.dist:0)||a.index-b.index);
+}
+function rankOverall(cityScores,category){
+  return cityScores.map((entry,index)=>{
+    const primary=PLANETS.filter(p=>p.cat===category).map(p=>({planet:p.key,...entry.score.dist[p.key]})).sort((a,b)=>a.dist-b.dist)[0];
+    return {...entry,index,primary,level:matchLevel(primary.dist),fallback:entry.score[category]===0};
+  }).sort((a,b)=>b.score[category]-a.score[category]||(a.fallback&&b.fallback?a.primary.dist-b.primary.dist:0)||a.index-b.index);
+}
+function MatchBadge({level,fallback,kind="best"}){
+  const label=level===3?"よく重なる":level===2?"少し離れる":"遠めの参考候補";
+  return h("span",{className:`matchBadge match${level} ${kind}`},h("span",{className:"matchStars",role:"img","aria-label":`${kind==="worst"?"ワースト":"ベスト"}のラインとの近さ ${level}/3`},"★".repeat(level)),h("span",{className:"matchLabel"},label),fallback&&h("span",{className:"fallbackTag"},"近い候補から選択"));
+}
+function MatchLegend(){
+  return h("div",{className:"matchLegend"},h("span",{className:"legendTitle"},"ラインとの近さ"),h("span",{className:"legendBest"},"ベスト ★"),h("span",{className:"legendWorst"},"ワースト ★"),h("span",{className:"legendScale"},"★★★ よく重なる / ★★ 少し離れる / ★ 遠めの参考候補"),h("p",{className:"hint"},"★の数はラインとの近さの目安です。該当が少ない場合も、近い都市を参考候補として表示します。"));
+}
+function AreaMembers({members,kind,onCity}){
+  return h("div",{className:"areaMembers"},h("p",{className:"hint"},"各地点を別々に計算しています。エリア内でも評価は異なります。"),...members.map(r=>h("div",{key:r.city.name,className:`areaMember ${kind}`},
+    h("h4",null,r.city.name),h(MatchBadge,{level:r.level,fallback:r.fallback,kind}),
+    h("p",{className:"hint"},r.fallback?"関連ラインからは離れた参考候補です。":LINE_DESC[r.primary.planet][r.primary.type]),
+    h("p",{className:"lineMeta"},`${PMETA[r.primary.planet].name} · ${LINE_MEAN[r.primary.type]} / ラインとの差 ${r.primary.dist.toFixed(1)}°`),
+    h("button",{className:"textButton",onClick:()=>onCity(r.city.name)},"この都市を詳しくみる ↗"))));
+}
+function RegistryInfo({cities}){
+  const areas=new Set(cities.map(c=>CITY_AREA_BY_NAME[c.name].id));
+  return h("details",{className:"explanation registryInfo"},h("summary",null,`対象の${cities.length}地点と、エリアのまとめ方`),
+    h("p",null,"都市規模と地域の広がりを考慮した登録リストです。人口順に全都市を網羅したものではなく、バリ島などの地域も含みます。計算には各地点の代表座標を使います。"),
+    h("p",null,`ランキングは${cities.length}地点を${areas.size}の都市・周辺エリアに分けた比較です。同じ国・地域で、すべての地点どうしが${AREA_RADIUS_KM}km以内のまとまりを1枠にしています。これはこのツールの表示ルールで、公式の都市圏の定義ではありません。`),
+    h("p",null,"各枠の順位と★は、そのランキングで最も上位の地点を代表に表示します。平均値ではありません。開くとエリア内の各都市を個別に確認できます。"),
+    ...REGION_ORDER.filter(region=>cities.some(c=>c.region===region)).map(region=>h("div",{className:"registryRegion",key:region},h("strong",null,region),h("p",{className:"hint"},cities.filter(c=>c.region===region).map(c=>`${c.name}（${c.country}）`).join(" / ")))));
+}
+function ThemeResults({entries,kind,onCity}){
+  return h("div",{className:"themeResults"},...entries.map((r,index)=>h("article",{key:r.areaId,className:`themeResult ${kind}`},
+    h("div",{className:"cardHead"},h("span",{className:"rankNumber"},`0${index+1}`),h("span",{className:"dim"},r.city.country)),
+    h("h3",null,r.areaLabel),r.members.length>1&&h("p",{className:"areaRepresentative"},`代表：${r.city.name} · ${r.members.length}地点`),
+    h(MatchBadge,{level:r.level,fallback:r.fallback,kind}),
+    h("p",null,r.fallback?"該当ラインからは離れていますが、登録地点の中で近い参考候補です。":LINE_DESC[r.primary.planet][r.primary.type]),
+    h("p",{className:"lineMeta"},`${PMETA[r.primary.planet].name} · ${LINE_MEAN[r.primary.type]} / ラインとの差 ${r.primary.dist.toFixed(1)}°`),
+    r.members.length>1?h("details",{className:"themeAreaDetails"},h("summary",null,`エリア内の${r.members.length}都市を比較`),h(AreaMembers,{members:r.members,kind,onCity})):h("button",{className:"textButton",onClick:()=>onCity(r.city.name)},"この都市を詳しくみる ↗"))));
+}
+// Original decorative artwork. Geometry and star positions stay fixed.
+function StarField(){
+  const dots=Array.from({length:210},(_,i)=>{
+    const x=((i*137+61)%1399),y=((i*i*43+i*97+37)%1097);
+    return h("circle",{key:i,cx:x,cy:y,r:i%17===0?1.3:i%5===0?.85:.45,fill:i%3===0?"#d8c9ea":"#c7d7f3",opacity:.18+(i%7)*.07});
+  });
+  const dust=Array.from({length:140},(_,i)=>h("circle",{key:`dust-${i}`,cx:(i*79+83)%660,cy:410+((i*i*29+i*41)%630),r:.4+(i%3)*.13,fill:"#ddcbea",opacity:.12+(i%5)*.035}));
+  const glints=[[123,190,7],[340,739,6],[661,120,4],[1148,288,5],[1268,870,7],[247,970,5]];
+  return h("svg",{className:"starField",viewBox:"0 0 1400 1100",preserveAspectRatio:"xMidYMin slice","aria-hidden":true,focusable:false},
+    h("defs",null,h("filter",{id:"starlightHalo",x:"-150%",y:"-150%",width:"400%",height:"400%"},h("feGaussianBlur",{stdDeviation:3}))),
+    ...dots,...dust,...glints.map(([x,y,r],i)=>h("g",{key:`glint-${i}`},
+      h("circle",{cx:x,cy:y,r:r*1.5,fill:"#cbbbea",opacity:.15,filter:"url(#starlightHalo)"}),
+      h("path",{d:`M ${x} ${y-r} Q ${x+1} ${y-1} ${x+r*.65} ${y} Q ${x+1} ${y+1} ${x} ${y+r} Q ${x-1} ${y+1} ${x-r*.65} ${y} Q ${x-1} ${y-1} ${x} ${y-r} Z`,fill:"#e8def5",opacity:.7}))));
+}
+function OrbitalArt(){
+  const cx=230,cy=233;
+  const point=(radius,angle)=>{const a=angle*Math.PI/180;return [cx+radius*Math.cos(a),cy+radius*Math.sin(a)];};
+  const polygon=(radius,count,rotation)=>Array.from({length:count},(_,i)=>point(radius,rotation+i*360/count).join(",")).join(" ");
+  const rays=Array.from({length:72},(_,i)=>{
+    const angle=i*5-90,a=point(i%6===0?153:159,angle),b=point(166,angle);
+    return h("line",{key:i,x1:a[0],y1:a[1],x2:b[0],y2:b[1],stroke:i%6===0?"#d5c9df":"#b1b8d3",strokeWidth:i%6===0?.85:.45,opacity:i%6===0?.7:.4});
+  });
+  return h("svg",{viewBox:"0 0 460 460",className:"orbitalArt","aria-hidden":true,focusable:false},
+    h("defs",null,
+      h("radialGradient",{id:"atlasSphere",cx:"36%",cy:"30%"},h("stop",{offset:"0%",stopColor:"#68719f",stopOpacity:.25}),h("stop",{offset:"60%",stopColor:"#303d6c",stopOpacity:.2}),h("stop",{offset:"100%",stopColor:"#141731",stopOpacity:.08})),
+      h("radialGradient",{id:"atlasAura"},h("stop",{offset:"0%",stopColor:"#aaa1d3",stopOpacity:.11}),h("stop",{offset:"100%",stopColor:"#aaa1d3",stopOpacity:0}))),
+    h("circle",{cx,cy,r:192,fill:"url(#atlasAura)"}),
+    h("g",{fill:"none"},
+      h("circle",{cx,cy,r:170,stroke:"#b7b7d1",strokeWidth:.55,opacity:.62}),
+      h("circle",{cx,cy,r:148,stroke:"#bfb2c8",strokeWidth:.6,opacity:.42}),
+      h("circle",{cx,cy,r:127,stroke:"#c7b99d",strokeWidth:.65,strokeDasharray:"1 9",opacity:.54}),
+      h("path",{d:"M230 53V91 M230 375V421 M40 233H79 M381 233H420",stroke:"#b5a4c0",strokeWidth:.65,opacity:.52}),
+      h("polygon",{points:polygon(123,5,-90),stroke:"#aab9d8",strokeWidth:.65,opacity:.32}),
+      h("polygon",{points:polygon(123,5,90),stroke:"#cebcd8",strokeWidth:.65,opacity:.27})),
+    ...rays,
+    h("g",{fill:"none",stroke:"#d2c29e",strokeWidth:.7,opacity:.72},
+      h("path",{d:"M243 17 A19 19 0 1 1 219 46 A17 17 0 0 0 243 17"}),
+      h("path",{d:"M230 411L240 428 230 438 220 428Z"}),
+      h("circle",{cx:230,cy:428,r:3.5})),
+    h("g",{fill:"none",strokeWidth:.9},
+      h("ellipse",{cx,cy,rx:183,ry:49,transform:`rotate(-28 ${cx} ${cy})`,stroke:"#ced1e4",opacity:.64}),
+      h("ellipse",{cx,cy,rx:179,ry:48,transform:`rotate(34 ${cx} ${cy})`,stroke:"#c1a8ba",opacity:.47})),
+    h("circle",{cx,cy,r:79,fill:"url(#atlasSphere)",stroke:"#ced5e9",strokeWidth:.9,opacity:.85}),
+    h("g",{fill:"none",stroke:"#bec9e4",strokeWidth:.6,opacity:.52},
+      h("ellipse",{cx,cy,rx:30,ry:79}),h("ellipse",{cx,cy,rx:59,ry:79}),
+      h("ellipse",{cx,cy,rx:79,ry:27}),h("ellipse",{cx,cy,rx:79,ry:55}),
+      h("line",{x1:151,y1:cy,x2:309,y2:cy}),h("line",{x1:cx,y1:154,x2:cx,y2:312})),
+    h("g",{className:"orbitalStars",fill:"#ece5f3"},
+      h("path",{d:"M230 205L234 228 250 233 234 238 230 261 226 238 210 233 226 228Z",opacity:.85}),
+      h("circle",{cx:375,cy:154,r:3.3,fill:"#d9d4e8"}),
+      h("path",{d:"M91 121L92 127 98 128 92 129 91 135 90 129 84 128 90 127Z",opacity:.75}),
+      h("path",{d:"M355 342L356 348 361 349 356 350 355 356 354 350 349 349 354 348Z",opacity:.65}),
+      h("circle",{cx:70,cy:327,r:1}),h("circle",{cx:387,cy:297,r:.85}),h("circle",{cx:303,cy:80,r:.85})),
+    h("text",{x:230,y:457,textAnchor:"middle",fill:"#aaa8c3",fontSize:8,letterSpacing:3,fontFamily:"monospace"},"A MAP OF YOUR POSSIBILITIES"));
+}
+function NatalDial({natal}){
+  return h("svg",{viewBox:"0 0 220 220",className:"natalDial","aria-label":"出生時の天体配置",role:"img"},h("circle",{cx:110,cy:110,r:92,fill:"none",stroke:"var(--line)"}),h("circle",{cx:110,cy:110,r:72,fill:"none",stroke:"var(--line)"}),...Array.from({length:12},(_,i)=>{const a=(i*30-90)*D2R;return h("line",{key:i,x1:110+72*Math.cos(a),y1:110+72*Math.sin(a),x2:110+92*Math.cos(a),y2:110+92*Math.sin(a),stroke:"var(--line)"});}),...PLANETS.map(p=>{const a=(natal.bodies[p.key].lon-90)*D2R;return h("text",{key:p.key,x:110+82*Math.cos(a),y:114+82*Math.sin(a),textAnchor:"middle",fontSize:15,fill:p.color},p.glyph);}),h("circle",{cx:110,cy:110,r:3,fill:"var(--accent)"}));
+}
+function Segments({options,value,onChange,label}){return h("div",{className:"segments",role:"group","aria-label":label},...options.map(([id,text])=>h("button",{type:"button",key:id,className:value===id?"selected":"","aria-pressed":value===id,onClick:()=>onChange(id)},text)));}
+function Field({label,id,children,hint}){return h("div",{className:"field"},h("label",{htmlFor:id},label),children,hint&&h("p",{className:"hint"},hint));}
+function CityOptions(){return REGION_ORDER.map(region=>h("optgroup",{key:region,label:region},...CITY_DB.filter(c=>c.region===region).map(c=>h("option",{key:c.name,value:c.name},`${c.name}（${c.country}）`))));}
+function CityDetail({natal,city}){
+  const dist=lineDistances(natal,city.lat,city.lon),verdict=buildVerdict(dist);
+  return h("section",{className:"panel cityDetail"},h("div",{className:"cardHead"},h("h2",null,city.name),h("span",{className:"mono dim"},`${city.lat.toFixed(2)}°, ${city.lon.toFixed(2)}°`)),h("p",{className:`verdictBox ${verdict.tone}`},verdict.text),...PLANETS.map(p=>({p,info:dist[p.key]})).sort((a,b)=>a.info.dist-b.info.dist).map(({p,info})=>h("div",{className:info.dist<ORB?"lineRow relevant":"lineRow weak",key:p.key},h("span",{className:"glyph",style:{color:p.color}},p.glyph),h("div",null,h("div",{className:"planetRowHeading"},h("strong",null,`${p.name} · ${LINE_MEAN[info.type]}`)),h("p",{className:"hint"},info.dist<ORB?LINE_DESC[p.key][info.type]:"このラインとの関連は弱めです。")),h("span",{className:"lineDistance"},`${info.dist.toFixed(1)}°`))),h("p",{className:"hint"},"数値はラインとの角度差の簡易指標です。小さいほどラインに近く、実際の距離（km）ではありません。"));
+}
+function RankingCard({entry,index,challenging,onCity}){
+  const {city,primary,fallback,level}=entry,kind=challenging?"worst":"best";
+  const content=[h("span",{className:"rankNumber",key:"number"},`0${index+1}`),h("span",{className:"rankBody",key:"body"},
+    h("span",{className:"cityName"},entry.areaLabel),h("span",{className:"dim region"},city.country),
+    entry.members.length>1&&h("span",{className:"areaRepresentative"},`代表：${city.name} · ${entry.members.length}地点を開いて比較`),
+    h(MatchBadge,{level,fallback,kind}),h("span",{className:"rankDescription"},fallback?"目立ったラインからは離れていますが、この範囲で近い参考候補です。":LINE_DESC[primary.planet][primary.type]),
+    h("span",{className:"lineMeta"},`${PMETA[primary.planet].name} · ${LINE_MEAN[primary.type]} / ラインとの差 ${primary.dist.toFixed(1)}°`)),h("span",{className:"arrow",key:"arrow","aria-hidden":true},entry.members.length>1?"⌄":"↗")];
+  return entry.members.length>1?h("details",{className:`rankArea ${challenging?"challenge":""}`},h("summary",{className:`rankCard ${challenging?"challenge":""}`},...content),h(AreaMembers,{members:entry.members,kind,onCity})):h("button",{className:`rankCard ${challenging?"challenge":""}`,onClick:()=>onCity(city.name)},...content);
+}
+export default function App(){
+  const [stage,setStage]=useState("form"),[form,setForm]=useState({date:"",time:"",off:9,lat:35.68,lon:139.77});
+  const [timeMode,setTimeMode]=useState("exact"),[period,setPeriod]=useState("noon"),[birthCityName,setBirthCityName]=useState("東京"),[manual,setManual]=useState(false),[error,setError]=useState("");
+  const [natal,setNatal]=useState(null),[birthSummary,setBirthSummary]=useState(null),[tab,setTab]=useState("rank"),[themeId,setThemeId]=useState("love"),[region,setRegion]=useState("world");
+  const [citySel,setCitySel]=useState("東京"),[custom,setCustom]=useState({name:"",lat:"",lon:""}),[useCustom,setUseCustom]=useState(false);
+  const [transitDate,setTransitDate]=useState(localISODate),[scanResult,setScanResult]=useState(null),[scanning,setScanning]=useState(false);
+  const update=(key,value)=>{setForm(f=>({...f,[key]:value}));setError("");};
+  function handleBirthCity(name){setBirthCityName(name);const c=CITY_DB.find(x=>x.name===name);if(c)setForm(f=>({...f,lat:c.lat,lon:c.lon,off:c.off}));}
+  function compute(e){
+    e.preventDefault();const issue=validateBirth(form,timeMode,period);if(issue){setError(issue);return;}
+    const usedTime=resolveBirthTime(timeMode,form.time,period),[y,m,d]=form.date.split("-").map(Number),[hh,mm]=usedTime.split(":").map(Number);
+    setNatal(computePositionsJD(julianDate(y,m,d,hh+mm/60)-Number(form.off)/24));
+    setBirthSummary({date:form.date,time:usedTime,off:form.off,city:manual?`緯度 ${form.lat} / 経度 ${form.lon}`:birthCityName,mode:timeMode,period:TIME_PERIODS.find(p=>p.id===period)?.label});
+    setTab("rank");setScanResult(null);setStage("dashboard");setError("");window.scrollTo({top:0,behavior:"smooth"});
+  }
+  const cities=useMemo(()=>region==="world"?CITY_DB:CITY_DB.filter(c=>c.region==="日本"),[region]);
+  const cityScores=useMemo(()=>natal?cities.map(city=>({city,score:scoreCity(natal,city)})):[],[natal,cities]);
+  const best3=useMemo(()=>groupRankings(rankOverall(cityScores,"fav")),[cityScores]);
+  const challenge3=useMemo(()=>groupRankings(rankOverall(cityScores,"cha")),[cityScores]);
+  const theme=THEMES.find(t=>t.id===themeId),themeRankings=useMemo(()=>natal?groupRankings(rankTheme(natal,theme,cities)):[],[natal,theme,cities]);
+  const themeWorst=useMemo(()=>natal?groupRankings(rankTheme(natal,{...theme,lines:theme.worstLines},cities)):[],[natal,theme,cities]);
+  const selectedCity=useCustom?(validCoordinates(custom.lat,custom.lon)?{name:custom.name||"指定地点",lat:Number(custom.lat),lon:Number(custom.lon)}:null):CITY_DB.find(c=>c.name===citySel);
+  const onCity=name=>{setCitySel(name);setUseCustom(false);setTab("city");};
+  const todayActivations=useMemo(()=>{
+    if(!natal||!validDate(transitDate))return [];const [y,m,d]=transitDate.split("-").map(Number),pos=computePositionsJD(julianDate(y,m,d,12)),acts=[];
+    for(const tb of TRANSIT_BODIES)for(const p of PLANETS){const diff=Math.abs(norm180(pos.bodies[tb].lon-natal.bodies[p.key].lon));if(diff<=TRANSIT_ORB)acts.push({transit:tb,natal:p.key,diff});}return acts.sort((a,b)=>a.diff-b.diff);
+  },[natal,transitDate]);
+  function runScan(){if(!validDate(transitDate)||scanning)return;setScanning(true);const scanDate=transitDate;setTimeout(()=>{try{const [y,m,d]=scanDate.split("-").map(Number);setScanResult({date:scanDate,events:scanTransits(natal,julianDate(y,m,d,12),365)});}finally{setScanning(false);}},30);}
+  const stepTitle=(num,title)=>h("div",{className:"stepTitle"},h("span",{className:"mono"},num),h("h2",null,title));
+  const approximate=birthSummary&&birthSummary.mode!=="exact";
+  function eventCard(a,key,isScan){const meta=PMETA[a.natal],best=bestCityForBody(natal,a.natal);return h("article",{className:"eventCard",key},h("div",{className:"eyebrow"},h("span",{style:{color:PMETA[a.transit].color}},`${PMETA[a.transit].glyph} ${PMETA[a.transit].name}`)," → ",h("span",{style:{color:meta.color}},`${meta.glyph} ${meta.name}`)),h("h3",null,`${best.city.name} · ${FORTUNE_LABEL[a.natal][best.type]}`),h("p",null,LINE_DESC[a.natal][best.type]),h("p",{className:"hint"},isScan?`${fmtDate(a.startDate)} ～ ${fmtDate(a.endDate)} / ピーク ${fmtDate(a.peakDate)}`:`天体の角度差 ${a.diff.toFixed(2)}° · ${LINE_MEAN[best.type]}`));}
+  return h("div",{className:"app"},h(StarField),
+    h("header",{className:"topbar"},h("a",{href:"./",className:"brand","aria-label":"AstroMapper トップ"},h("span",{className:"brandIcon"},"✳"),"ASTRO",h("span",{className:"brandLight"},"MAPPER")),h("span",{className:"headerNote"},"A PLACE TO BE YOURSELF")),
+    h("main",{className:stage==="form"?"wrap":"wrap dashboard"},
+      stage==="form"?h("div",{className:"introLayout"},
+        h("section",{className:"intro"},h("div",{className:"eyebrow"},"ASTROCARTOGRAPHY / 星と土地の相性"),h("h1",null,"あなたが輝く場所を、",h("br"),h("span",null,"星から探す。")),h("p",{className:"lede"},"恋をする。働く。暮らす。",h("br"),"生まれた瞬間の星の配置から、あなたと世界のつながりを読み解く。"),h(OrbitalArt),h("div",{className:"introStats"},h("span",null,h("b",null,String(CITY_DB.length)),"登録都市"),h("span",null,h("b",null,"07"),"テーマ"),h("span",null,h("b",null,"FREE"),"登録不要"))),
+        h("section",{className:"formSection"},h("div",{className:"formHeader"},h("div",{className:"eyebrow"},"YOUR BIRTH DATA"),h("h2",null,"はじまりの座標を入力"),h("p",{className:"hint"},"生まれた日の現地時間で入力してください。")),
+          h("form",{className:"panel birthForm",onSubmit:compute,noValidate:true},
+            stepTitle("01","生年月日"),h(Field,{label:"生まれた日",id:"birth-date"},h("input",{id:"birth-date",type:"date",min:"1900-01-01",max:localISODate(),value:form.date,onChange:e=>update("date",e.target.value),required:true})),
+            stepTitle("02","生まれた時間"),h(Segments,{label:"出生時間の入力方法",options:[["exact","正確な時間"],["approx","だいたい"],["unknown","不明"]],value:timeMode,onChange:v=>{setTimeMode(v);setError("");}}),
+            timeMode==="exact"&&h(Field,{label:"出生時刻（現地時間）",id:"birth-time",hint:"母子手帳などで確認できる時刻を入力。"},h("input",{id:"birth-time",type:"time",value:form.time,onChange:e=>update("time",e.target.value),required:true})),
+            timeMode==="approx"&&h("div",null,h("div",{className:"periodGrid",role:"group","aria-label":"生まれた時間帯"},...TIME_PERIODS.map(p=>h("button",{key:p.id,type:"button",className:period===p.id?"period selected":"period","aria-pressed":period===p.id,onClick:()=>setPeriod(p.id)},h("strong",null,p.label),h("span",null,p.range)))),h("p",{className:"notice"},`選んだ時間帯の代表時刻 ${resolveBirthTime(timeMode,form.time,period)} で仮計算します。出生時間の違いで都市の順位やラインが大きく変わるため、結果は参考としてご覧ください。深夜は入力した生年月日の午前0〜4時です。`)),
+            timeMode==="unknown"&&h("p",{className:"notice"},"出生日の12:00を仮の時刻として計算します。時間が不明な場合、都市の順位は大きく変わる可能性があります。正確な時刻がわかったら入力し直してください。"),
+            stepTitle("03","生まれた場所"),h(Segments,{label:"出生地の入力方法",options:[["city","都市から選ぶ"],["manual","緯度・経度"]],value:manual?"manual":"city",onChange:v=>{setManual(v==="manual");setError("");}}),
+            !manual?h(Field,{label:"出生地に近い都市",id:"birth-city"},h("select",{id:"birth-city",value:birthCityName,onChange:e=>handleBirthCity(e.target.value)},...CityOptions())):h("div",{className:"row2"},h(Field,{label:"緯度（北＋ / 南−）",id:"birth-lat"},h("input",{id:"birth-lat",type:"number",min:-90,max:90,step:"any",value:form.lat,onChange:e=>update("lat",e.target.value)})),h(Field,{label:"経度（東＋ / 西−）",id:"birth-lon"},h("input",{id:"birth-lon",type:"number",min:-180,max:180,step:"any",value:form.lon,onChange:e=>update("lon",e.target.value)}))),
+            h("details",{className:"advanced"},h("summary",null,`時差・サマータイムの確認 · UTC${Number(form.off)>=0?"+":""}${form.off}`),h(Field,{label:"出生当時のUTCオフセット",id:"utc-offset",hint:"都市の標準時を自動入力します。夏時間や過去の時差は自動補正されません。日本は通常＋9です。"},h("input",{id:"utc-offset",type:"number",min:-12,max:14,step:.25,value:form.off,onChange:e=>update("off",e.target.value)}))),
+            error&&h("p",{className:"error",role:"alert"},error),h("button",{className:"btn",type:"submit"},"星と土地の相性をみる",h("span",null,"↗")),h("p",{className:"privacy"},"出生データはブラウザ内で計算・処理します。保存や外部送信はしません。")),h("p",{className:"note"},"占星術の解釈を楽しむためのツールです。未来や運気を科学的に予測・保証するものではありません。")))
+      :h("div",null,
+        h("button",{className:"backLink",onClick:()=>{setStage("form");setError("");}},"← 出生データを編集"),
+        h("section",{className:"resultHero"},h("div",null,h("div",{className:"eyebrow"},"YOUR PERSONAL ATLAS"),h("h1",null,"星と、あなたの居場所。"),h("p",{className:"birthBadge"},`${birthSummary.date} / ${birthSummary.mode==="approx"?birthSummary.period+" · 仮 ":birthSummary.mode==="unknown"?"時間不明 · 仮 ":""}${birthSummary.time} / UTC${Number(birthSummary.off)>=0?"+":""}${birthSummary.off} / ${birthSummary.city}`)),h(NatalDial,{natal})),
+        approximate&&h("p",{className:"notice",role:"status"},`参考結果 · ${birthSummary.time}を仮の出生時刻として計算しています。時間帯の違いで、おすすめ都市やラインは大きく変わることがあります。`),
+        h("nav",{className:"tabs","aria-label":"診断結果の表示"},...[["rank","総合ランキング"],["themes","テーマで探す"],["city","都市を調べる"],["timing","タイミング"]].map(([id,label])=>h("button",{key:id,onClick:()=>setTab(id),className:tab===id?"active":"","aria-current":tab===id?"page":undefined},label))),
+        (tab==="themes"||tab==="rank")&&h("div",{className:"sectionHead"},h("p",{className:"hint"},`対象：${cities.length}地点 · 近隣都市は1枠にまとめて表示`),h(Segments,{label:"おすすめ都市の範囲",options:[["world","世界"],["japan","日本"]],value:region,onChange:setRegion})),
+        (tab==="themes"||tab==="rank")&&h(RegistryInfo,{cities}),
+        tab==="themes"&&h("section",null,h("div",{className:"sectionTitle"},h("h2",null,"いま、大切にしたいことは？"),h("p",{className:"hint"},"テーマを選ぶと、関連する天体ラインからベストとワーストの都市を探します。")),
+          h("div",{className:"themeGrid",role:"group","aria-label":"診断テーマ"},...THEMES.map(t=>h("button",{key:t.id,className:themeId===t.id?"themeTile active":"themeTile",style:{"--theme-color":t.color},"aria-pressed":themeId===t.id,onClick:()=>setThemeId(t.id)},h("span",{className:"themeIcon",style:t.id==="self"?{color:PMETA.Sun.color}:undefined},t.icon),h("span",{className:"themeName"},t.label),h("span",{className:"themeEnglish"},t.short)))),
+          h(MatchLegend),
+          h("div",{className:"themeHeading bestHeading"},h("div",{className:"eyebrow"},`${theme.short} / BEST PLACES`),h("h2",null,`${theme.label}のベスト3`),h("p",{className:"lede"},theme.description)),
+          h(ThemeResults,{entries:themeRankings,kind:"best",onCity}),
+          h("div",{className:"themeHeading worstHeading"},h("div",{className:"eyebrow"},`${theme.short} / WORST PLACES`),h("h2",null,`${theme.label}のワースト3`),h("p",{className:"lede"},theme.worstDescription)),
+          h(ThemeResults,{entries:themeWorst,kind:"worst",onCity}),
+          h("details",{className:"explanation"},h("summary",null,"このテーマの選び方"),h("p",null,"ベストはテーマを支えるライン、ワーストはテーマに課題や刺激をもたらすと読むラインから、近さと重みを合計して順位を出します。9°未満の該当が少ないときは、遠い都市もラインが近い順に加えて、近隣都市をまとめた各3枠を表示します。★は説明に表示したラインとの差が3°未満で3つ、3°以上9°未満で2つ、9°以上で1つです。このツール独自の簡易ルールで、登録都市内の比較です。"),
+            h("p",{className:"hint"},"ベスト："+theme.lines.map(([p,line])=>`${PMETA[p].name} × ${LINE_MEAN[line]}`).join(" / ")),
+            h("p",{className:"hint"},"ワースト："+theme.worstLines.map(([p,line])=>`${PMETA[p].name} × ${LINE_MEAN[line]}`).join(" / ")),
+            h("p",{className:"hint"},"ワーストは必ず悪いことが起きるという意味ではなく、責任・衝突・変化などに向き合う場としての解釈です。同じ都市・エリアがベストとワーストの両方に入ることもあります。"),
+            theme.id==="fortune"&&h("p",{className:"hint"},"金運は機会や発展の象徴としての表現です。収入額や投資の成果を予測するものではありません。"),theme.id==="create"&&h("p",{className:"hint"},"海王星は感性を刺激する一方で、曖昧さを感じやすいとも解釈されます。"))),
+        tab==="rank"&&h("section",null,h(MatchLegend),h("div",{className:"sectionTitle bestHeading"},h("h2",null,"総合ベスト3"),h("p",{className:"hint"},"心地よく感じたり、自分の持ち味を発揮しやすいと解釈される都市。太陽・月・金星・木星の近いラインを合計しています。")),h("div",{className:"rankingList"},...best3.map((entry,index)=>h(RankingCard,{key:entry.city.name,entry,index,onCity}))),!best3.length&&h("p",{className:"notice"},"目立ったラインに近い都市はありません。"),h("div",{className:"sectionTitle challengeTitle worstHeading"},h("h2",null,"総合ワースト3"),h("p",{className:"hint"},"刺激や挑戦、責任や変化のテーマが高まりやすいと解釈される都市。火星・土星・天王星・冥王星の近いラインを合計しています。悪いことが起きるという意味ではありません。")),h("div",{className:"rankingList"},...challenge3.map((entry,index)=>h(RankingCard,{key:entry.city.name,entry,index,challenging:true,onCity}))),!challenge3.length&&h("p",{className:"notice"},"目立ったラインに近い都市はありません。")),
+        tab==="city"&&h("section",null,h("div",{className:"sectionTitle"},h("h2",null,"気になる都市との相性"),h("p",{className:"hint"},"旅行先や、次の暮らしの候補を調べる。")),h(Segments,{label:"調べる地点の選び方",options:[["city","登録都市"],["custom","緯度・経度"]],value:useCustom?"custom":"city",onChange:v=>setUseCustom(v==="custom")}),!useCustom?h(Field,{label:"調べたい都市",id:"result-city"},h("select",{id:"result-city",value:citySel,onChange:e=>setCitySel(e.target.value)},...CityOptions())):h("div",{className:"panel"},h(Field,{label:"地名（任意）",id:"custom-name"},h("input",{id:"custom-name",type:"text",value:custom.name,onChange:e=>setCustom(c=>({...c,name:e.target.value}))})),h("div",{className:"row2"},...[["lat","緯度",-90,90],["lon","経度",-180,180]].map(([key,label,min,max])=>h(Field,{key,label,id:`custom-${key}`},h("input",{id:`custom-${key}`,type:"number",min,max,step:"any",value:custom[key],onChange:e=>setCustom(c=>({...c,[key]:e.target.value}))}))))),selectedCity?h(CityDetail,{natal,city:selectedCity}):h("p",{className:"notice"},"有効な緯度（−90〜90）・経度（−180〜180）を入力してください。")),
+        tab==="timing"&&h("section",null,h("div",{className:"sectionTitle"},h("h2",null,"星の動きから、タイミングをみる"),h("p",{className:"lede"},"現在の天体と出生時の天体が近づく日を探す、簡易的なタイミング読みです。表示する都市は、対応する出生時のラインに最も近い登録都市です。")),h(Field,{label:"基準日（UTCの12:00で比較）",id:"transit-date"},h("input",{id:"transit-date",type:"date",min:"1900-01-01",max:"2100-12-31",value:transitDate,disabled:scanning,onChange:e=>{setTransitDate(e.target.value);setScanResult(null);}})),!validDate(transitDate)&&h("p",{className:"error",role:"alert"},"基準日を1900〜2100年の範囲で入力してください。"),h("h3",{className:"sectionLabel"},"この日の主なテーマ"),...todayActivations.map((a,i)=>eventCard(a,i,false)),validDate(transitDate)&&!todayActivations.length&&h("p",{className:"notice"},"この日は、簡易モデルで目立った接近が見つかりませんでした。"),h("button",{className:"btn secondary",disabled:scanning||!validDate(transitDate),onClick:runScan},scanning?"星の動きを計算中…":"ここから1年のタイムラインをみる"),scanResult&&h("div",{className:"scanResults","aria-live":"polite"},h("h3",{className:"sectionLabel"},`${scanResult.date}から1年間`),...scanResult.events.map((a,i)=>eventCard(a,i,true)),!scanResult.events.length&&h("p",{className:"notice"},"この期間には目立った接近が見つかりませんでした。"))),
+        h("p",{className:"note"},"天体の位置とラインは簡易モデルで計算しています。都市の順位は占星術的な解釈の目安です。出生時刻や当時の時差が違うと結果が変わります。"))),
+    h("footer",{className:"footer"},h("span",{className:"mono"},"ASTROMAPPER"),h("span",null,"星をヒントに、選ぶのはあなた。"),stage==="form"&&h("span",{className:"creatorCredit"},"CREATED BY ",h("strong",null,"EM-EMPIRE"))));
+}
